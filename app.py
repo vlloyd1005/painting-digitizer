@@ -19,6 +19,7 @@ Multi-stage painting digitization workflow:
 Run with: streamlit run app.py
 """
 
+import base64
 import io
 import zipfile
 
@@ -27,14 +28,31 @@ import numpy as np
 import streamlit as st
 from PIL import Image
 
-# streamlit-drawable-canvas has a known bug (upstream issue #133): it
-# prepends st._config.get_option("server.baseUrlPath") onto the background
-# image's URL. That's empty on plain localhost (so it works fine there),
-# but Streamlit Community Cloud's hosting sets a real baseUrlPath for its
-# own routing -- which corrupts the URL once deployed, and the canvas
-# background shows up black because the browser can't load it. Force that
-# lookup to always return "" so the library's URL-building works the way
-# it does locally, regardless of hosting environment.
+# streamlit-drawable-canvas renders inside a sandboxed iframe and asks
+# Streamlit to serve the background image at a server-relative URL (e.g.
+# "/media/abc123.png"). That resolves fine on localhost, where the iframe
+# happens to share the same origin as the app -- but once actually
+# deployed, that relative path can resolve against the wrong origin/base,
+# 404, and the canvas shows solid black because the browser never loads
+# the image. The fix: make the "URL" a self-contained base64 data URI
+# instead. A data URI has no path or origin to resolve -- it's the image
+# itself, inline -- so it works identically no matter how the app is
+# hosted or proxied.
+import streamlit.elements.image as _st_image_module
+
+def _image_to_data_url(image, width=None, clamp=False, channels="RGB", output_format="PNG", image_id=""):
+    fmt = (output_format or "PNG").upper()
+    if fmt not in ("PNG", "JPEG"):
+        fmt = "PNG"
+    buf = io.BytesIO()
+    image.save(buf, format=fmt)
+    b64 = base64.b64encode(buf.getvalue()).decode("ascii")
+    return f"data:image/{fmt.lower()};base64,{b64}"
+
+_st_image_module.image_to_url = _image_to_data_url
+
+# Also neutralize the library's baseUrlPath prefixing (harmless no-op now
+# that image_to_url returns a full data URI, but kept as a safety net).
 _orig_get_option = st._config.get_option
 def _patched_get_option(key):
     if key == "server.baseUrlPath":
