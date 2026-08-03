@@ -130,6 +130,8 @@ svg.addEventListener("pointercancel", onPointerUp);
 window.addEventListener("message", (event) => {
   const msg = event.data;
   if (!msg || msg.type !== "streamlit:render") return;
+  handshakeAcked = true;
+  if (readyInterval) { clearInterval(readyInterval); readyInterval = null; }
   const args = msg.args || {};
   window.__bgDataUrl = args.background_data_url || null;
   width = args.width || width;
@@ -144,8 +146,23 @@ window.addEventListener("message", (event) => {
   render();
 });
 
-// Handshake: tell Streamlit we're ready to receive render events.
-window.parent.postMessage({ type: "streamlit:componentReady", apiVersion: 1 }, "*");
+// Handshake: tell Streamlit we're ready to receive render events. Sent
+// repeatedly (not just once) in case the parent's own message listener
+// isn't fully attached yet at the instant this fires -- a real risk when
+// this page is loaded fast from an external host rather than Streamlit's
+// own local static serving, where that race is less likely. Without a
+// retry, a single lost message means waiting out Streamlit's full 60s
+// timeout for nothing, which is exactly what silently happened before.
+let handshakeAcked = false;
+function sendReady() {
+  window.parent.postMessage({ type: "streamlit:componentReady", apiVersion: 1 }, "*");
+}
+sendReady();
+let readyInterval = setInterval(() => {
+  if (handshakeAcked) { clearInterval(readyInterval); readyInterval = null; return; }
+  sendReady();
+}, 300);
+
 </script>
 </body>
 </html>
