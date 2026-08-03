@@ -59,13 +59,20 @@ from painting_detect import find_corners_colormask, order_points, warp_to_rectan
 # and never goes through streamlit_drawable_canvas.st_image at all, so it's
 # completely unaffected -- there is nothing to restore, and nothing to leak.
 def _image_to_data_url(image, width=None, clamp=False, channels="RGB", output_format="PNG", image_id=""):
-    fmt = (output_format or "PNG").upper()
-    if fmt not in ("PNG", "JPEG"):
-        fmt = "PNG"
+    # Always encode as JPEG regardless of what the library asks for (it
+    # always requests "PNG"). This is just a background reference image for
+    # visual alignment while dragging corners -- it doesn't need to be
+    # lossless, and JPEG is dramatically smaller for photographic content.
+    # That matters because this data URI travels through Streamlit's
+    # custom-component argument-passing channel, and a large base64 PNG
+    # payload is a plausible reason it silently fails to arrive/render on
+    # a hosted deployment even though it works fine on localhost.
+    if image.mode != "RGB":
+        image = image.convert("RGB")
     buf = io.BytesIO()
-    image.save(buf, format=fmt)
+    image.save(buf, format="JPEG", quality=85)
     b64 = base64.b64encode(buf.getvalue()).decode("ascii")
-    return f"data:image/{fmt.lower()};base64,{b64}"
+    return f"data:image/jpeg;base64,{b64}"
 
 class _FakeStImageModule:
     image_to_url = staticmethod(_image_to_data_url)
