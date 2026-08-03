@@ -287,6 +287,12 @@ def stage_crop():
         cv2.cvtColor(cv2.resize(img_full, (disp_w, disp_h)), cv2.COLOR_BGR2RGB)
     )
 
+    with st.expander("🔧 Debug: is the photo data itself OK?", expanded=True):
+        st.write("If this shows the actual painting clearly, the image data and pipeline up to this point are fine -- the problem is specifically inside the canvas component below, not our data.")
+        st.image(disp_img, caption="Exact same image object being sent to the canvas as background", use_column_width=True)
+        _debug_url = _image_to_data_url(disp_img)
+        st.caption(f"Data URI: {len(_debug_url):,} characters total. Starts with: `{_debug_url[:60]}...`")
+
     # Passing initial_drawing=None does NOT mean "leave the canvas alone" --
     # per the library's own docs, None *empties* the canvas. So we must
     # always pass a real drawing. The original jitter came from a different
