@@ -17,11 +17,26 @@ known-flaky area on some hosting platforms -- see
 https://github.com/streamlit/streamlit/issues/9465, which describes this
 exact symptom ("trouble loading the component... frontend assets") across
 several different custom components on various deployment platforms.
-Using url= instead points the component's iframe directly at a fetchable
-URL (GitHub's raw content CDN, serving straight from this same repo),
-which sidesteps that static-serving pipeline entirely. Our HTML file is
-fully self-contained (inline CSS/JS, no other asset requests), so a plain
-URL fetch is all it needs.
+
+An initial attempt pointed url= directly at raw.githubusercontent.com.
+That turned out to be actively hostile to this use case -- checked
+directly with `curl -I` against the real URL, which confirmed GitHub
+serves raw files with three separate blockers stacked together:
+  x-frame-options: deny                     (refuses ANY iframe embedding)
+  content-security-policy: ...; sandbox     (blocks script execution even if loaded)
+  content-type: text/plain                  (browser won't parse/run it as HTML at all)
+A second attempt tried jsDelivr's GitHub-mirroring CDN, which fixed the
+framing issue (no x-frame-options sent) but turned out to just relay
+GitHub's own content-type metadata rather than inferring it fresh from
+the .html extension -- so it was STILL served as text/plain, and with
+x-content-type-options: nosniff also present, the browser won't guess
+otherwise.
+
+The actual fix: GitHub Pages, GitHub's real static-site hosting product
+(as opposed to its deliberately-locked-down raw-content endpoint).
+Verified directly via `curl -I` against the live Pages URL: correct
+`content-type: text/html`, no framing-restriction headers, 200 status,
+and a content-length exactly matching this file's real size.
 
 If you fork/rename this repo, update RAW_HTML_URL below to match.
 """
@@ -31,7 +46,7 @@ import io
 
 import streamlit.components.v1 as components
 
-RAW_HTML_URL = "https://raw.githubusercontent.com/vlloyd1005/painting-digitizer/main/corner_editor_frontend/index.html"
+RAW_HTML_URL = "https://vlloyd1005.github.io/painting-digitizer/corner_editor_frontend/index.html"
 
 _corner_editor_component = components.declare_component(
     "corner_editor",
