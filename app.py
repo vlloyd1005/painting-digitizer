@@ -27,6 +27,11 @@ import cv2
 import numpy as np
 import streamlit as st
 from PIL import Image
+import streamlit.elements.image as _st_image_module
+from streamlit_drawable_canvas import st_canvas
+
+from flat_field import apply_flat_field
+from painting_detect import find_corners_colormask, order_points, warp_to_rectangle
 
 # streamlit-drawable-canvas renders inside a sandboxed iframe and asks
 # Streamlit to serve the background image at a server-relative URL (e.g.
@@ -34,11 +39,16 @@ from PIL import Image
 # happens to share the same origin as the app -- but once actually
 # deployed, that relative path can resolve against the wrong origin/base,
 # 404, and the canvas shows solid black because the browser never loads
-# the image. The fix: make the "URL" a self-contained base64 data URI
-# instead. A data URI has no path or origin to resolve -- it's the image
-# itself, inline -- so it works identically no matter how the app is
-# hosted or proxied.
-import streamlit.elements.image as _st_image_module
+# the image. Fix: make the "URL" a self-contained base64 data URI instead,
+# which has no path/origin to resolve.
+#
+# IMPORTANT: streamlit.elements.image.image_to_url is also what Streamlit's
+# own st.image() widget uses internally (with a different call signature --
+# it passes numpy arrays, not PIL Images). So this patch must be applied
+# ONLY for the instant st_canvas() itself is running, then immediately
+# reverted -- patching it permanently at import time broke every other
+# st.image() call in the app.
+_real_image_to_url = _st_image_module.image_to_url
 
 def _image_to_data_url(image, width=None, clamp=False, channels="RGB", output_format="PNG", image_id=""):
     fmt = (output_format or "PNG").upper()
@@ -49,21 +59,13 @@ def _image_to_data_url(image, width=None, clamp=False, channels="RGB", output_fo
     b64 = base64.b64encode(buf.getvalue()).decode("ascii")
     return f"data:image/{fmt.lower()};base64,{b64}"
 
-_st_image_module.image_to_url = _image_to_data_url
-
-# Also neutralize the library's baseUrlPath prefixing (harmless no-op now
-# that image_to_url returns a full data URI, but kept as a safety net).
-_orig_get_option = st._config.get_option
-def _patched_get_option(key):
-    if key == "server.baseUrlPath":
-        return ""
-    return _orig_get_option(key)
-st._config.get_option = _patched_get_option
-
-from streamlit_drawable_canvas import st_canvas
-
-from flat_field import apply_flat_field
-from painting_detect import find_corners_colormask, order_points, warp_to_rectangle
+def st_canvas_with_data_uri_bg(**kwargs):
+    """Wraps st_canvas(), swapping in the data-URI patch only for this call."""
+    _st_image_module.image_to_url = _image_to_data_url
+    try:
+        return st_canvas(**kwargs)
+    finally:
+        _st_image_module.image_to_url = _real_image_to_url
 
 st.set_page_config(page_title="Painting Digitizer", layout="wide")
 
@@ -283,7 +285,7 @@ def stage_crop():
     st.session_state.corners[name] = corners_to_show
     disp_corners = np.round(corners_to_show * scale)
 
-    canvas_result = st_canvas(
+    canvas_result = st_canvas_with_data_uri_bg(
         background_image=disp_img,
         height=disp_h,
         width=disp_w,
