@@ -27,7 +27,7 @@ import cv2
 import numpy as np
 import streamlit as st
 from PIL import Image
-import streamlit.elements.image as _st_image_module
+import streamlit_drawable_canvas as _sdc
 from streamlit_drawable_canvas import st_canvas
 
 from flat_field import apply_flat_field
@@ -42,14 +42,22 @@ from painting_detect import find_corners_colormask, order_points, warp_to_rectan
 # the image. Fix: make the "URL" a self-contained base64 data URI instead,
 # which has no path/origin to resolve.
 #
-# IMPORTANT: streamlit.elements.image.image_to_url is also what Streamlit's
-# own st.image() widget uses internally (with a different call signature --
-# it passes numpy arrays, not PIL Images). So this patch must be applied
-# ONLY for the instant st_canvas() itself is running, then immediately
-# reverted -- patching it permanently at import time broke every other
-# st.image() call in the app.
-_real_image_to_url = _st_image_module.image_to_url
-
+# IMPORTANT: earlier attempts patched streamlit.elements.image.image_to_url
+# directly (temporarily, via try/finally around the st_canvas() call). That
+# function is also what Streamlit's own st.image() widget uses internally,
+# and the temporary-swap approach turned out not to reliably un-patch itself
+# on Streamlit Cloud (likely because Streamlit's own rerun mechanism can
+# interrupt script execution in a way that doesn't behave like an ordinary
+# Python exception, so a `finally` block isn't guaranteed to run before the
+# next script run starts) -- it kept leaking into st.image() calls elsewhere.
+#
+# This version is leak-proof by construction: streamlit_drawable_canvas's
+# own module has its OWN name "st_image" bound to the real
+# streamlit.elements.image module. We replace THAT one name, inside
+# streamlit_drawable_canvas's own namespace only. Streamlit's own st.image()
+# widget looks up image_to_url through its own module's namespace directly
+# and never goes through streamlit_drawable_canvas.st_image at all, so it's
+# completely unaffected -- there is nothing to restore, and nothing to leak.
 def _image_to_data_url(image, width=None, clamp=False, channels="RGB", output_format="PNG", image_id=""):
     fmt = (output_format or "PNG").upper()
     if fmt not in ("PNG", "JPEG"):
@@ -59,15 +67,13 @@ def _image_to_data_url(image, width=None, clamp=False, channels="RGB", output_fo
     b64 = base64.b64encode(buf.getvalue()).decode("ascii")
     return f"data:image/{fmt.lower()};base64,{b64}"
 
-def st_canvas_with_data_uri_bg(**kwargs):
-    """Wraps st_canvas(), swapping in the data-URI patch only for this call."""
-    _st_image_module.image_to_url = _image_to_data_url
-    try:
-        return st_canvas(**kwargs)
-    finally:
-        _st_image_module.image_to_url = _real_image_to_url
+class _FakeStImageModule:
+    image_to_url = staticmethod(_image_to_data_url)
+
+_sdc.st_image = _FakeStImageModule()
 
 st.set_page_config(page_title="Painting Digitizer", layout="wide")
+
 
 DISPLAY_MAX_DIM = 900
 HANDLE_RADIUS = 3
@@ -285,7 +291,7 @@ def stage_crop():
     st.session_state.corners[name] = corners_to_show
     disp_corners = np.round(corners_to_show * scale)
 
-    canvas_result = st_canvas_with_data_uri_bg(
+    canvas_result = st_canvas(
         background_image=disp_img,
         height=disp_h,
         width=disp_w,
