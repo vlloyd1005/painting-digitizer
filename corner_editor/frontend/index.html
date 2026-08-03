@@ -1,0 +1,151 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  html, body { margin: 0; padding: 0; background: transparent; overflow: hidden; }
+  svg { display: block; touch-action: none; }
+  circle.handle { cursor: grab; }
+  circle.handle:active { cursor: grabbing; }
+</style>
+</head>
+<body>
+<svg id="root" xmlns="http://www.w3.org/2000/svg"></svg>
+
+<script>
+/*
+ * Minimal hand-written Streamlit "static component" -- implements the
+ * same low-level postMessage protocol every Streamlit component uses
+ * (documented at https://docs.streamlit.io/develop/concepts/custom-components),
+ * without any third-party JS library. Written after streamlit-drawable-canvas
+ * (an abandoned third-party package) turned out to have a frontend bug that
+ * silently failed to render its background image once actually deployed --
+ * confirmed via direct inline debugging that the image data itself was always
+ * valid, so the bug was entirely inside that library's own code, with nothing
+ * left to fix from the Python side. Writing our own tiny component removes
+ * that dependency, and this file is short enough to fully understand and
+ * debug ourselves if anything ever goes wrong with it.
+ *
+ * Protocol summary:
+ *   - On load: postMessage({type: "streamlit:componentReady", apiVersion: 1})
+ *   - Streamlit responds with "streamlit:render" events containing .args
+ *   - To report a value back to Python: postMessage({type: "streamlit:setComponentValue", value: ...})
+ *   - To size the iframe: postMessage({type: "streamlit:setFrameHeight", height: ...})
+ */
+
+const svg = document.getElementById("root");
+let dragIndex = null;
+let corners = [];       // [[x,y], [x,y], [x,y], [x,y]] in display-pixel space
+let width = 600, height = 400;
+let handleRadius = 6;
+let edgeColors = ["#e63946", "#2a9d8f", "#457b9d", "#f4a261"];
+
+function sendValue(value) {
+  window.parent.postMessage({
+    type: "streamlit:setComponentValue",
+    value: value,
+    dataType: "json",
+  }, "*");
+}
+
+function setFrameHeight(h) {
+  window.parent.postMessage({ type: "streamlit:setFrameHeight", height: h }, "*");
+}
+
+function el(tag, attrs) {
+  const e = document.createElementNS("http://www.w3.org/2000/svg", tag);
+  for (const k in attrs) e.setAttribute(k, attrs[k]);
+  return e;
+}
+
+function render() {
+  svg.setAttribute("width", width);
+  svg.setAttribute("height", height);
+  svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
+  svg.innerHTML = "";
+
+  if (window.__bgDataUrl) {
+    svg.appendChild(el("image", {
+      href: window.__bgDataUrl, x: 0, y: 0, width: width, height: height,
+      preserveAspectRatio: "none",
+    }));
+  }
+
+  const pointsStr = corners.map(p => p.join(",")).join(" ");
+  svg.appendChild(el("polygon", {
+    points: pointsStr, fill: "rgba(0,120,255,0.25)", stroke: "none",
+  }));
+
+  for (let i = 0; i < corners.length; i++) {
+    const a = corners[i];
+    const b = corners[(i + 1) % corners.length];
+    svg.appendChild(el("line", {
+      x1: a[0], y1: a[1], x2: b[0], y2: b[1],
+      stroke: edgeColors[i % edgeColors.length], "stroke-width": 1,
+    }));
+  }
+
+  corners.forEach((p, i) => {
+    const c = el("circle", {
+      cx: p[0], cy: p[1], r: handleRadius,
+      fill: "rgba(0,200,0,0.9)", stroke: "white", "stroke-width": 1,
+      class: "handle", "data-index": i,
+    });
+    c.addEventListener("pointerdown", onPointerDown);
+    svg.appendChild(c);
+  });
+
+  setFrameHeight(height);
+}
+
+function onPointerDown(evt) {
+  dragIndex = parseInt(evt.target.getAttribute("data-index"), 10);
+  evt.target.setPointerCapture(evt.pointerId);
+  evt.preventDefault();
+}
+
+function onPointerMove(evt) {
+  if (dragIndex === null) return;
+  const rect = svg.getBoundingClientRect();
+  const scaleX = width / rect.width;
+  const scaleY = height / rect.height;
+  let x = (evt.clientX - rect.left) * scaleX;
+  let y = (evt.clientY - rect.top) * scaleY;
+  x = Math.max(0, Math.min(width, x));
+  y = Math.max(0, Math.min(height, y));
+  corners[dragIndex] = [x, y];
+  render();
+}
+
+function onPointerUp(evt) {
+  if (dragIndex === null) return;
+  dragIndex = null;
+  sendValue({ corners: corners });
+}
+
+svg.addEventListener("pointermove", onPointerMove);
+svg.addEventListener("pointerup", onPointerUp);
+svg.addEventListener("pointercancel", onPointerUp);
+
+window.addEventListener("message", (event) => {
+  const msg = event.data;
+  if (!msg || msg.type !== "streamlit:render") return;
+  const args = msg.args || {};
+  window.__bgDataUrl = args.background_data_url || null;
+  width = args.width || width;
+  height = args.height || height;
+  handleRadius = args.handle_radius || handleRadius;
+  if (Array.isArray(args.edge_colors) && args.edge_colors.length) {
+    edgeColors = args.edge_colors;
+  }
+  if (Array.isArray(args.corners)) {
+    corners = args.corners.map(p => [p[0], p[1]]);
+  }
+  render();
+});
+
+// Handshake: tell Streamlit we're ready to receive render events.
+window.parent.postMessage({ type: "streamlit:componentReady", apiVersion: 1 }, "*");
+</script>
+</body>
+</html>

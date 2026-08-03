@@ -17,9 +17,19 @@ Multi-stage painting digitization workflow:
                       resolution and download as a zip of high-quality JPEGs.
 
 Run with: streamlit run app.py
+
+NOTE ON THE CROP UI: this used to use the third-party library
+streamlit-drawable-canvas. That library turned out to have a frontend bug
+that silently failed to render its background image once actually deployed
+(confirmed via direct debugging that the image data itself was always
+valid and correctly sized -- the failure was entirely inside that
+library's own JS, with nothing left to fix from the Python side). Rather
+than keep patching around an abandoned dependency, `corner_editor.py`
+implements a small custom Streamlit component by hand, using the same
+low-level protocol every component uses, with no third-party canvas
+library involved.
 """
 
-import base64
 import io
 import zipfile
 
@@ -27,64 +37,15 @@ import cv2
 import numpy as np
 import streamlit as st
 from PIL import Image
-import streamlit_drawable_canvas as _sdc
-from streamlit_drawable_canvas import st_canvas
 
+from corner_editor import corner_editor, image_to_jpeg_data_url
 from flat_field import apply_flat_field
 from painting_detect import find_corners_colormask, order_points, warp_to_rectangle
 
-# streamlit-drawable-canvas renders inside a sandboxed iframe and asks
-# Streamlit to serve the background image at a server-relative URL (e.g.
-# "/media/abc123.png"). That resolves fine on localhost, where the iframe
-# happens to share the same origin as the app -- but once actually
-# deployed, that relative path can resolve against the wrong origin/base,
-# 404, and the canvas shows solid black because the browser never loads
-# the image. Fix: make the "URL" a self-contained base64 data URI instead,
-# which has no path/origin to resolve.
-#
-# IMPORTANT: earlier attempts patched streamlit.elements.image.image_to_url
-# directly (temporarily, via try/finally around the st_canvas() call). That
-# function is also what Streamlit's own st.image() widget uses internally,
-# and the temporary-swap approach turned out not to reliably un-patch itself
-# on Streamlit Cloud (likely because Streamlit's own rerun mechanism can
-# interrupt script execution in a way that doesn't behave like an ordinary
-# Python exception, so a `finally` block isn't guaranteed to run before the
-# next script run starts) -- it kept leaking into st.image() calls elsewhere.
-#
-# This version is leak-proof by construction: streamlit_drawable_canvas's
-# own module has its OWN name "st_image" bound to the real
-# streamlit.elements.image module. We replace THAT one name, inside
-# streamlit_drawable_canvas's own namespace only. Streamlit's own st.image()
-# widget looks up image_to_url through its own module's namespace directly
-# and never goes through streamlit_drawable_canvas.st_image at all, so it's
-# completely unaffected -- there is nothing to restore, and nothing to leak.
-def _image_to_data_url(image, width=None, clamp=False, channels="RGB", output_format="PNG", image_id=""):
-    # Always encode as JPEG regardless of what the library asks for (it
-    # always requests "PNG"). This is just a background reference image for
-    # visual alignment while dragging corners -- it doesn't need to be
-    # lossless, and JPEG is dramatically smaller for photographic content.
-    # That matters because this data URI travels through Streamlit's
-    # custom-component argument-passing channel, and a large base64 PNG
-    # payload is a plausible reason it silently fails to arrive/render on
-    # a hosted deployment even though it works fine on localhost.
-    if image.mode != "RGB":
-        image = image.convert("RGB")
-    buf = io.BytesIO()
-    image.save(buf, format="JPEG", quality=85)
-    b64 = base64.b64encode(buf.getvalue()).decode("ascii")
-    return f"data:image/jpeg;base64,{b64}"
-
-class _FakeStImageModule:
-    image_to_url = staticmethod(_image_to_data_url)
-
-_sdc.st_image = _FakeStImageModule()
-
 st.set_page_config(page_title="Painting Digitizer", layout="wide")
 
-
 DISPLAY_MAX_DIM = 900
-HANDLE_RADIUS = 3
-EDGE_LINE_WIDTH = 1
+HANDLE_RADIUS = 6
 EDGE_COLORS = ["#e63946", "#2a9d8f", "#457b9d", "#f4a261"]  # top, right, bottom, left
 
 # ---------------------------------------------------------------- helpers
@@ -102,7 +63,6 @@ def init_state():
         "crop_order": [],   # list of names going into crop stage
         "crop_index": 0,
         "corners": {},      # name -> 4x2 array (full-res coords)
-        "canvas_rev": {},   # name -> int, bumped to force-remount canvas
         "skip_crop": False, # True if user chose to skip cropping entirely
     }
     for k, v in defaults.items():
@@ -114,6 +74,16 @@ def reset_all():
     for k in list(st.session_state.keys()):
         del st.session_state[k]
     init_state()
+
+
+def clip_corners(corners, w, h):
+    """Keep corners within the image bounds -- auto-detection (minAreaRect
+    on a convex hull) can return points slightly outside the image edges,
+    which puts a handle off-screen and undraggable."""
+    corners = np.array(corners, dtype=float).copy()
+    corners[:, 0] = np.clip(corners[:, 0], 0, w - 1)
+    corners[:, 1] = np.clip(corners[:, 1], 0, h - 1)
+    return corners
 
 
 # ---------------------------------------------------------------- stage 1
@@ -164,7 +134,7 @@ def stage_review():
     for i, name in enumerate(names):
         with cols[i % 3]:
             img_rgb = cv2.cvtColor(st.session_state.images[name], cv2.COLOR_BGR2RGB)
-            st.image(img_rgb, caption=name, use_column_width=True)
+            st.image(img_rgb, caption=name, use_container_width=True)
             st.session_state.approved[name] = st.checkbox(
                 "Looks correct", value=st.session_state.approved[name], key=f"chk_{name}"
             )
@@ -208,59 +178,6 @@ def stage_review():
 
 # ---------------------------------------------------------------- stage 3
 
-def build_canvas_objects(disp_corners):
-    """4 draggable circles + translucent fill + 4 colored edge lines."""
-    objects = [
-        {
-            "type": "polygon",
-            "left": 0, "top": 0,
-            "points": [{"x": float(p[0]), "y": float(p[1])} for p in disp_corners],
-            "fill": "rgba(0, 120, 255, 0.25)",
-            "stroke": "rgba(0,0,0,0)",
-            "selectable": False,
-            "evented": False,
-        }
-    ]
-    n = len(disp_corners)
-    for i in range(n):
-        p1, p2 = disp_corners[i], disp_corners[(i + 1) % n]
-        objects.append(
-            {
-                "type": "line",
-                "x1": float(p1[0]), "y1": float(p1[1]),
-                "x2": float(p2[0]), "y2": float(p2[1]),
-                "stroke": EDGE_COLORS[i % len(EDGE_COLORS)],
-                "strokeWidth": EDGE_LINE_WIDTH,
-                "selectable": False,
-                "evented": False,
-            }
-        )
-    for p in disp_corners:
-        objects.append(
-            {
-                "type": "circle",
-                "left": float(p[0]) - HANDLE_RADIUS,
-                "top": float(p[1]) - HANDLE_RADIUS,
-                "radius": HANDLE_RADIUS,
-                "fill": "rgba(0, 200, 0, 0.9)",
-                "stroke": "white",
-                "strokeWidth": 1,
-                "hasControls": False,
-            }
-        )
-    return objects
-
-
-def clip_corners(corners, w, h):
-    """Keep corners within the image bounds -- auto-detection (minAreaRect
-    on a convex hull) can return points slightly outside the image edges,
-    which puts a handle off-screen and undraggable."""
-    corners = np.array(corners, dtype=float).copy()
-    corners[:, 0] = np.clip(corners[:, 0], 0, w - 1)
-    corners[:, 1] = np.clip(corners[:, 1], 0, h - 1)
-    return corners
-
-
 def stage_crop():
     order = st.session_state.crop_order
     idx = st.session_state.crop_index
@@ -279,77 +196,33 @@ def stage_crop():
                 np.array([[w*m, h*m], [w*(1-m), h*m], [w*(1-m), h*(1-m)], [w*m, h*(1-m)]])
             )
         st.session_state.corners[name] = clip_corners(detected, w, h)
-        st.session_state.canvas_rev[name] = 0
 
     scale = min(1.0, DISPLAY_MAX_DIM / max(h, w))
     disp_w, disp_h = int(w * scale), int(h * scale)
     disp_img = Image.fromarray(
         cv2.cvtColor(cv2.resize(img_full, (disp_w, disp_h)), cv2.COLOR_BGR2RGB)
     )
+    data_url = image_to_jpeg_data_url(disp_img)
 
-    with st.expander("🔧 Debug: is the photo data itself OK?", expanded=True):
-        st.write("If this shows the actual painting clearly, the image data and pipeline up to this point are fine -- the problem is specifically inside the canvas component below, not our data.")
-        st.image(disp_img, caption="Exact same image object being sent to the canvas as background", use_column_width=True)
-        _debug_url = _image_to_data_url(disp_img)
-        st.caption(f"Data URI: {len(_debug_url):,} characters total. Starts with: `{_debug_url[:60]}...`")
+    corners_to_show = st.session_state.corners[name]
+    disp_corners = (corners_to_show * scale).tolist()
 
-    # Passing initial_drawing=None does NOT mean "leave the canvas alone" --
-    # per the library's own docs, None *empties* the canvas. So we must
-    # always pass a real drawing. The original jitter came from a different
-    # cause: floating-point drift between what we send and what the browser
-    # echoes back, which never exactly converges. Rounding coordinates to
-    # whole pixels on both the write and read side makes the round-trip
-    # exact, so it settles instead of oscillating.
-    corners_to_show = np.round(st.session_state.corners[name]).astype(float)
-    st.session_state.corners[name] = corners_to_show
-    disp_corners = np.round(corners_to_show * scale)
-
-    canvas_result = st_canvas(
-        background_image=disp_img,
-        height=disp_h,
+    result = corner_editor(
+        background_data_url=data_url,
         width=disp_w,
-        drawing_mode="transform",
-        initial_drawing={"version": "4.4.0", "objects": build_canvas_objects(disp_corners)},
-        key=f"canvas_{name}_{st.session_state.canvas_rev[name]}",
-        display_toolbar=False,
+        height=disp_h,
+        corners=disp_corners,
+        handle_radius=HANDLE_RADIUS,
+        edge_colors=EDGE_COLORS,
+        key=f"corner_editor_{name}",
     )
 
-    if canvas_result.json_data is not None:
-        circles = [o for o in canvas_result.json_data["objects"] if o["type"] == "circle"]
-        if len(circles) == 4:
-            returned_positions = np.array(
-                [[c["left"] + c["radius"], c["top"] + c["radius"]] for c in circles]
-            )
-            # IMPORTANT: don't assume circles[i] is still "slot i". In
-            # "transform" drawing mode, fabric.js brings the object you just
-            # dragged to the front of its internal stack, which reorders the
-            # serialized objects array. Matching by array index after that
-            # silently swaps which stored corner gets which new position --
-            # harmless-looking after one drag, visibly broken (oscillating)
-            # after a second. Match each known slot to its NEAREST returned
-            # circle instead, which is robust to that reordering.
-            prev_disp = corners_to_show * scale
-            used = set()
-            new_disp_corners = np.zeros_like(prev_disp)
-            for i, prev_pt in enumerate(prev_disp):
-                dists = np.linalg.norm(returned_positions - prev_pt, axis=1)
-                for j in used:
-                    dists[j] = np.inf
-                best = int(np.argmin(dists))
-                new_disp_corners[i] = returned_positions[best]
-                used.add(best)
-            new_disp_corners = np.round(new_disp_corners)
-            new_corners = np.round(new_disp_corners / scale)
-            new_corners = clip_corners(new_corners, w, h)
-            if not np.allclose(new_corners, corners_to_show, atol=0.01):
-                st.session_state.corners[name] = new_corners
-                # Force a full remount (new widget key) rather than updating
-                # initial_drawing on the same persistent component instance.
-                # Repeatedly reloading content into a long-lived instance can
-                # leave stale/duplicate objects behind instead of cleanly
-                # replacing them -- a fresh mount avoids that entirely.
-                st.session_state.canvas_rev[name] += 1
-                st.rerun()
+    if result is not None and "corners" in result:
+        new_disp_corners = np.array(result["corners"], dtype=float)
+        new_corners = clip_corners(new_disp_corners / scale, w, h)
+        if not np.allclose(new_corners, corners_to_show, atol=0.01):
+            st.session_state.corners[name] = new_corners
+            st.rerun()
 
     col1, col2, col3 = st.columns([1, 1, 4])
     with col1:
@@ -374,7 +247,6 @@ def stage_crop():
             detected = find_corners_colormask(img_full)
             if detected is not None:
                 st.session_state.corners[name] = clip_corners(detected, w, h)
-                st.session_state.canvas_rev[name] += 1
                 st.rerun()
 
 
@@ -399,7 +271,7 @@ def stage_export():
 
     for name in order:
         st.subheader(name)
-        st.image(get_result_rgb(name), use_column_width=True)
+        st.image(get_result_rgb(name), use_container_width=True)
         if not skip_crop:
             if st.button("Re-crop this image", key=f"recrop_{name}"):
                 st.session_state.crop_index = order.index(name)
