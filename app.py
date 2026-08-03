@@ -26,6 +26,22 @@ import cv2
 import numpy as np
 import streamlit as st
 from PIL import Image
+
+# streamlit-drawable-canvas has a known bug (upstream issue #133): it
+# prepends st._config.get_option("server.baseUrlPath") onto the background
+# image's URL. That's empty on plain localhost (so it works fine there),
+# but Streamlit Community Cloud's hosting sets a real baseUrlPath for its
+# own routing -- which corrupts the URL once deployed, and the canvas
+# background shows up black because the browser can't load it. Force that
+# lookup to always return "" so the library's URL-building works the way
+# it does locally, regardless of hosting environment.
+_orig_get_option = st._config.get_option
+def _patched_get_option(key):
+    if key == "server.baseUrlPath":
+        return ""
+    return _orig_get_option(key)
+st._config.get_option = _patched_get_option
+
 from streamlit_drawable_canvas import st_canvas
 
 from flat_field import apply_flat_field
