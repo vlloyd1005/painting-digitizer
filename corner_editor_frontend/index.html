@@ -3,13 +3,19 @@
 <head>
 <meta charset="utf-8">
 <style>
-  html, body { margin: 0; padding: 0; background: transparent; overflow: hidden; }
+  html, body { margin: 0; padding: 0; background: #ff00ff; overflow: hidden; }
+  /* TEMP DEBUG: bright magenta background, visible immediately via pure CSS,
+     with zero dependency on any JS running or the handshake succeeding.
+     If this color doesn't show up inside the actual embedded iframe, the
+     page isn't loading in that context at all, regardless of what happens
+     when visiting the URL directly in its own tab. */
   svg { display: block; touch-action: none; }
   circle.handle { cursor: grab; }
   circle.handle:active { cursor: grabbing; }
 </style>
 </head>
 <body>
+<div style="font-size:24px; color:white; font-family:sans-serif; padding:20px;">TEMP DEBUG: page loaded (static HTML, no JS needed for this text)</div>
 <svg id="root" xmlns="http://www.w3.org/2000/svg"></svg>
 
 <script>
