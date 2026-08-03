@@ -1,0 +1,8 @@
+painting_env/
+venv/
+__pycache__/
+*.pyc
+.DS_Store
+*.jpg
+*.jpeg
+*.png
