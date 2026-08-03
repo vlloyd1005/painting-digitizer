@@ -134,7 +134,7 @@ def stage_review():
     for i, name in enumerate(names):
         with cols[i % 3]:
             img_rgb = cv2.cvtColor(st.session_state.images[name], cv2.COLOR_BGR2RGB)
-            st.image(img_rgb, caption=name, use_container_width=True)
+            st.image(img_rgb, caption=name, width="stretch")
             st.session_state.approved[name] = st.checkbox(
                 "Looks correct", value=st.session_state.approved[name], key=f"chk_{name}"
             )
@@ -271,7 +271,7 @@ def stage_export():
 
     for name in order:
         st.subheader(name)
-        st.image(get_result_rgb(name), use_container_width=True)
+        st.image(get_result_rgb(name), width="stretch")
         if not skip_crop:
             if st.button("Re-crop this image", key=f"recrop_{name}"):
                 st.session_state.crop_index = order.index(name)

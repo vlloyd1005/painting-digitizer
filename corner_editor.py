@@ -17,7 +17,7 @@ import os
 
 import streamlit.components.v1 as components
 
-_FRONTEND_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "corner_editor", "frontend")
+_FRONTEND_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "corner_editor_frontend")
 
 _corner_editor_component = components.declare_component(
     "corner_editor",
