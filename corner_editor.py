@@ -1,6 +1,6 @@
 """
 Python side of a small, hand-written Streamlit component for dragging the
-4 corners of a quad over a background image. See corner_editor/frontend/index.html
+4 corners of a quad over a background image. See corner_editor_frontend/index.html
 for the JS half and the protocol it implements.
 
 Built after streamlit-drawable-canvas (a third-party, unmaintained library)
@@ -9,19 +9,33 @@ background image once actually deployed, with the failure confirmed to be
 entirely inside that library's own JS. This has no third-party canvas
 dependency at all -- just the same low-level component protocol every
 Streamlit component (including that one) is built on.
+
+IMPORTANT: this uses declare_component(url=...) rather than path=...
+Streamlit's local static-file serving for custom, locally-authored
+components (as opposed to ones installed from PyPI) is a documented,
+known-flaky area on some hosting platforms -- see
+https://github.com/streamlit/streamlit/issues/9465, which describes this
+exact symptom ("trouble loading the component... frontend assets") across
+several different custom components on various deployment platforms.
+Using url= instead points the component's iframe directly at a fetchable
+URL (GitHub's raw content CDN, serving straight from this same repo),
+which sidesteps that static-serving pipeline entirely. Our HTML file is
+fully self-contained (inline CSS/JS, no other asset requests), so a plain
+URL fetch is all it needs.
+
+If you fork/rename this repo, update RAW_HTML_URL below to match.
 """
 
 import base64
 import io
-import os
 
 import streamlit.components.v1 as components
 
-_FRONTEND_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "corner_editor_frontend")
+RAW_HTML_URL = "https://raw.githubusercontent.com/vlloyd1005/painting-digitizer/main/corner_editor_frontend/index.html"
 
 _corner_editor_component = components.declare_component(
     "corner_editor",
-    path=_FRONTEND_DIR,
+    url=RAW_HTML_URL,
 )
 
 
